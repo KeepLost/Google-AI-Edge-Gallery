@@ -73,6 +73,7 @@ import androidx.navigation.navArgument
 import com.google.ai.edge.gallery.GalleryEvent
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskData
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskDataForBuiltinTask
+import com.google.ai.edge.gallery.customtasks.server.ServerControlScreen
 import com.google.ai.edge.gallery.data.ModelDownloadStatusType
 import com.google.ai.edge.gallery.data.Task
 import com.google.ai.edge.gallery.data.isLegacyTasks
@@ -99,6 +100,7 @@ private const val ROUTE_MODEL = "route_model"
 private const val ROUTE_BENCHMARK = "benchmark"
 private const val ROUTE_MODEL_MANAGER = "model_manager"
 private const val ROUTE_NOTIFICATIONS = "notifications"
+private const val ROUTE_SERVER = "server"
 private const val ENTER_ANIMATION_DURATION_MS = 500
 private val ENTER_ANIMATION_EASING = EaseOutExpo
 private const val ENTER_ANIMATION_DELAY_MS = 100
@@ -213,6 +215,7 @@ fun GalleryNavHost(
             },
             onModelsClicked = { navController.navigate(ROUTE_MODEL_MANAGER) },
             onNotificationsClicked = { navController.navigate(ROUTE_NOTIFICATIONS) },
+            onOpenServerClicked = { navController.navigate(ROUTE_SERVER) },
             gm4 = true,
           )
         }
@@ -436,6 +439,20 @@ fun GalleryNavHost(
       exitTransition = { slideDownExit() },
     ) {
       NotificationsScreen(navigateUp = { navController.navigateUp() })
+    }
+
+    // OpenAI-compatible local server control page (app-level destination, reached from the drawer).
+    // Rendered directly with the shared model manager so it bypasses the per-task model-list gate.
+    composable(
+      route = ROUTE_SERVER,
+      enterTransition = { slideUpEnter() },
+      exitTransition = { slideDownExit() },
+    ) {
+      ServerControlScreen(
+        modelManagerViewModel = modelManagerViewModel,
+        onNavigateUp = { navController.navigateUp() },
+        onNavigateToModels = { navController.navigate(ROUTE_MODEL_MANAGER) },
+      )
     }
 
     // Benchmark creation page.

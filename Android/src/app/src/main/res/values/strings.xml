@@ -95,6 +95,8 @@
   <string name="drawer_models_description" translatable="false">Browse, try, and benchmark models</string>
   <string name="drawer_notifications_label" translatable="false">Notifications</string>
   <string name="drawer_notifications_description" translatable="false">View scheduled notifications</string>
+  <string name="drawer_server_label" translatable="false">OpenAI Server</string>
+  <string name="drawer_server_description" translatable="false">Serve Gemma over a local OpenAI-compatible API</string>
   <string name="notifications_title" translatable="false">Notifications</string>
   <string name="notifications_empty_state" translatable="false">No scheduled notifications</string>
   <string name="notifications_delete_dialog_title" translatable="false">Delete Notification</string>
@@ -485,5 +487,10 @@
   <string name="cd_scroll_to_bottom">Scroll to bottom</string>
   <!-- Content description spoken when the "chat history" icon is focused. [CHAR_LIMIT=NONE] -->
   <string name="cd_chat_history">Chat history</string>
+
+  <!-- OpenAI-compatible local server notification strings. -->
+  <string name="server_notification_title" translatable="false">OpenAI Server running</string>
+  <string name="server_notification_text" translatable="false">Listening on %1$s:%2$d (%3$s)</string>
+  <string name="server_notification_stop" translatable="false">Stop</string>
 
 </resources>

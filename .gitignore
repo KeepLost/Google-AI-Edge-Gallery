@@ -1,1 +1,11 @@
 .DS_Store
+status/
+.session-sid
+.opencode/
+*.log
+*.apk
+*.aab
+*.ap_
+*.jks
+*.keystore
+google-services.json

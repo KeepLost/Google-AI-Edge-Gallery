@@ -81,10 +81,11 @@ import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.VideoFile
 import androidx.compose.material.icons.rounded.Videocam
-import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -150,6 +151,12 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "AGMessageInputText"
 
+/** Which video source flow to launch after the user confirms an extraction FPS. */
+private enum class VideoInputAction {
+  RECORD,
+  PICK,
+}
+
 /**
  * Composable function to display a text input field for composing chat messages.
  *
@@ -202,6 +209,12 @@ fun MessageInputText(
   var pickedImages by remember { mutableStateOf<List<Bitmap>>(listOf()) }
   var pickedAudioClips by remember { mutableStateOf<List<AudioClip>>(listOf()) }
   var videoFps by remember { mutableStateOf(VideoFrameSampler.DEFAULT_FPS) }
+  // FPS selection is shown only when the user chooses a video source (record/pick), so the chips
+  // never occupy the shared input row. pendingVideoAction holds which video flow to launch once the
+  // user confirms an FPS in the bottom sheet.
+  var showVideoFpsSheet by remember { mutableStateOf(false) }
+  var pendingVideoAction by remember { mutableStateOf<VideoInputAction?>(null) }
+  val videoFpsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   var pendingRecordedVideoFile by remember { mutableStateOf<File?>(null) }
   var hasFrontCamera by remember { mutableStateOf(false) }
   val sensorObserver = remember { SensorObserver(context) }
@@ -348,6 +361,46 @@ fun MessageInputText(
         result.data?.data?.let { uri -> handleVideoSelected(uri, false) }
       }
     }
+
+  // Launches the system video recorder. Called after the user confirms an FPS in the video FPS
+  // bottom sheet. Mirrors the previous inline "Record video" behavior.
+  val launchRecordVideo: () -> Unit = {
+    when (PackageManager.PERMISSION_GRANTED) {
+      ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) -> {
+        val file = createRecordedVideoFile(context)
+        pendingRecordedVideoFile = file
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+        val intent =
+          Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, uri)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          }
+        recordVideoLauncher.launch(intent)
+      }
+      else -> takePicturePermissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+  }
+
+  // Launches the system video file picker. Called after the user confirms an FPS in the video FPS
+  // bottom sheet. Mirrors the previous inline "Pick video file" behavior.
+  val launchPickVideo: () -> Unit = {
+    val intent =
+      Intent(Intent.ACTION_GET_CONTENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "video/*"
+        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      }
+    pickVideoLauncher.launch(intent)
+  }
+
+  // Opens the FPS selection bottom sheet for the given video source.
+  val openVideoFpsSheet: (VideoInputAction) -> Unit = { action ->
+    pendingVideoAction = action
+    showAddContentMenu = false
+    showVideoFpsSheet = true
+  }
 
   DisposableEffect(lifecycleOwner) {
     lifecycleOwner.lifecycle.addObserver(sensorObserver)
@@ -576,27 +629,9 @@ fun MessageInputText(
                               showAddContentMenu = false
                               return@DropdownMenuItem
                             }
-                            when (PackageManager.PERMISSION_GRANTED) {
-                              ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) -> {
-                                val file = createRecordedVideoFile(context)
-                                pendingRecordedVideoFile = file
-                                val uri =
-                                  FileProvider.getUriForFile(
-                                    context,
-                                    "${context.packageName}.provider",
-                                    file,
-                                  )
-                                val intent =
-                                  Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
-                                    putExtra(MediaStore.EXTRA_OUTPUT, uri)
-                                    addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                  }
-                                recordVideoLauncher.launch(intent)
-                                showAddContentMenu = false
-                              }
-                              else -> takePicturePermissionLauncher.launch(Manifest.permission.CAMERA)
-                            }
+                            // Ask for the extraction FPS first; the recorder is launched after the
+                            // user confirms in the FPS bottom sheet.
+                            openVideoFpsSheet(VideoInputAction.RECORD)
                           },
                         )
 
@@ -617,15 +652,9 @@ fun MessageInputText(
                               showAddContentMenu = false
                               return@DropdownMenuItem
                             }
-                            val intent =
-                              Intent(Intent.ACTION_GET_CONTENT).apply {
-                                addCategory(Intent.CATEGORY_OPENABLE)
-                                type = "video/*"
-                                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                              }
-                            pickVideoLauncher.launch(intent)
-                            showAddContentMenu = false
+                            // Ask for the extraction FPS first; the picker is launched after the
+                            // user confirms in the FPS bottom sheet.
+                            openVideoFpsSheet(VideoInputAction.PICK)
                           },
                         )
                       }
@@ -778,18 +807,6 @@ fun MessageInputText(
                       }
                     }
                   }
-
-                  if (showImagePicker) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                      VideoFrameSampler.SUPPORTED_FPS.forEach { fps ->
-                        AssistChip(
-                          onClick = { videoFps = fps },
-                          label = { Text("${fps}fps") },
-                          enabled = !inProgress && !isResettingSession && !modelInitializing,
-                        )
-                      }
-                    }
-                  }
                 }
 
                 // Stop button.
@@ -891,6 +908,61 @@ fun MessageInputText(
       onHistoryItemDeleted = { item -> modelManagerViewModel.deleteTextInputHistory(item) },
       onHistoryItemsDeleteAll = { modelManagerViewModel.clearTextInputHistory() },
     )
+  }
+
+  // FPS selection for video frame extraction. Shown only after the user picks a video source
+  // (record/pick) so the chips never crowd the shared input row. Confirming launches the pending
+  // video flow with the chosen FPS; dismissing leaves the input unchanged and launches nothing.
+  if (showVideoFpsSheet) {
+    var pendingFps by remember(showVideoFpsSheet) { mutableStateOf(videoFps) }
+    val dismissVideoFpsSheet: () -> Unit = {
+      scope.launch {
+        videoFpsSheetState.hide()
+        showVideoFpsSheet = false
+        pendingVideoAction = null
+      }
+    }
+    ModalBottomSheet(sheetState = videoFpsSheetState, onDismissRequest = { dismissVideoFpsSheet() }) {
+      Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
+        Text(text = "Video frame rate", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+          text = "Choose how many frames per second to extract from the video.",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          VideoFrameSampler.SUPPORTED_FPS.forEach { fps ->
+            FilterChip(
+              selected = pendingFps == fps,
+              onClick = { pendingFps = fps },
+              label = { Text("${fps}fps") },
+            )
+          }
+        }
+        Spacer(modifier = Modifier.height(20.dp))
+        val action = pendingVideoAction
+        Button(
+          modifier = Modifier.fillMaxWidth(),
+          onClick = {
+            videoFps = pendingFps
+            scope.launch {
+              videoFpsSheetState.hide()
+              showVideoFpsSheet = false
+              pendingVideoAction = null
+              when (action) {
+                VideoInputAction.RECORD -> launchRecordVideo()
+                VideoInputAction.PICK -> launchPickVideo()
+                null -> {}
+              }
+            }
+          },
+        ) {
+          Text("Continue")
+        }
+      }
+    }
   }
 
   if (showCameraCaptureBottomSheet) {
