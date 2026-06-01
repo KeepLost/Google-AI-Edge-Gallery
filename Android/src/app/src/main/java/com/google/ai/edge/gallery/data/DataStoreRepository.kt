@@ -476,6 +476,7 @@ class DefaultDataStoreRepository(
       SurveillanceRuntimeSettings.sanitize(
         frameSamplingFps = settings.frameSamplingFps,
         lookbackSeconds = settings.lookbackSeconds,
+        minConfidence = settings.minConfidence,
       )
     runBlocking {
       dataStore.updateData { currentSettings ->
@@ -484,6 +485,7 @@ class DefaultDataStoreRepository(
           .setSurveillanceFrameSamplingFps(sanitized.frameSamplingFps)
           .setSurveillanceLookbackSeconds(sanitized.lookbackSeconds)
           .setSurveillanceMaxFrameCache(sanitized.maxFramesPerRequest)
+          .setSurveillanceMinConfidence(sanitized.minConfidence)
           .build()
       }
     }
@@ -506,6 +508,7 @@ class DefaultDataStoreRepository(
       SurveillanceRuntimeSettings.sanitize(
         frameSamplingFps = settings.surveillanceFrameSamplingFps.takeIf { it > 0f } ?: defaults.frameSamplingFps,
         lookbackSeconds = migratedLookbackSeconds,
+        minConfidence = settings.surveillanceMinConfidence.takeIf { it > 0f } ?: defaults.minConfidence,
       )
     }
   }

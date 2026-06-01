@@ -15,7 +15,9 @@ internal object SurveillanceDataModule {
   @Provides
   @Singleton
   fun provideDatabase(@ApplicationContext context: Context): SurveillanceDatabase {
-    return Room.databaseBuilder(context, SurveillanceDatabase::class.java, "surveillance.db").build()
+    return Room.databaseBuilder(context, SurveillanceDatabase::class.java, "surveillance.db")
+      .addMigrations(SurveillanceDatabase.MIGRATION_1_2)
+      .build()
   }
 
   @Provides fun provideRuleDao(database: SurveillanceDatabase): SurveillanceRuleDao = database.ruleDao()

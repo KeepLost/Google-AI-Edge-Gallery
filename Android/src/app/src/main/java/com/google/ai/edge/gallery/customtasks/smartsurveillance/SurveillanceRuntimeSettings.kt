@@ -6,6 +6,7 @@ import kotlin.math.roundToLong
 data class SurveillanceRuntimeSettings(
   val frameSamplingFps: Float,
   val lookbackSeconds: Int,
+  val minConfidence: Float = DEFAULT_MIN_CONFIDENCE,
 ) {
   val frameSamplingIntervalMs: Long
     get() = (1_000f / frameSamplingFps).roundToLong()
@@ -32,18 +33,22 @@ data class SurveillanceRuntimeSettings(
     const val MAX_LOOKBACK_SECONDS = 60
     const val MIN_FRAME_CACHE = 1
     const val MAX_FRAME_CACHE = 30
+    const val DEFAULT_MIN_CONFIDENCE = 0.5f
     val SUPPORTED_FRAME_SAMPLING_FPS = listOf(0.5f, 1f, 2f)
     val SUPPORTED_LOOKBACK_SECONDS = listOf(3, 4, 5, 10)
+    val SUPPORTED_MIN_CONFIDENCE = listOf(0.3f, 0.5f, 0.7f, 0.9f)
 
     fun defaults(): SurveillanceRuntimeSettings =
       SurveillanceRuntimeSettings(
         frameSamplingFps = DEFAULT_FRAME_SAMPLING_FPS,
         lookbackSeconds = DEFAULT_LOOKBACK_SECONDS,
+        minConfidence = DEFAULT_MIN_CONFIDENCE,
       )
 
     fun sanitize(
       frameSamplingFps: Float,
       lookbackSeconds: Int,
+      minConfidence: Float = DEFAULT_MIN_CONFIDENCE,
     ): SurveillanceRuntimeSettings {
       val resolvedFrameSamplingFps =
         SUPPORTED_FRAME_SAMPLING_FPS.firstOrNull { it == frameSamplingFps } ?: DEFAULT_FRAME_SAMPLING_FPS
@@ -53,9 +58,12 @@ data class SurveillanceRuntimeSettings(
         } else {
           lookbackSeconds.coerceIn(MIN_LOOKBACK_SECONDS, MAX_LOOKBACK_SECONDS)
         }
+      val resolvedMinConfidence =
+        if (minConfidence.isNaN() || minConfidence <= 0f) DEFAULT_MIN_CONFIDENCE else minConfidence.coerceIn(0f, 1f)
       return SurveillanceRuntimeSettings(
         frameSamplingFps = resolvedFrameSamplingFps,
         lookbackSeconds = resolvedLookbackSeconds,
+        minConfidence = resolvedMinConfidence,
       )
     }
 

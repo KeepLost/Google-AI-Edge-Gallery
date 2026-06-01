@@ -89,6 +89,7 @@ message Settings {
   float surveillance_frame_sampling_fps = 16;
   int32 surveillance_analysis_interval_seconds = 17;
   int32 surveillance_lookback_seconds = 18;
+  float surveillance_min_confidence = 19;
 }
 
 message McpAuth {

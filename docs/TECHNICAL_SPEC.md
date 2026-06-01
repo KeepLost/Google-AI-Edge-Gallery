@@ -88,6 +88,27 @@ Initial executable action scope:
 - Rule hits may trigger TTS.
 - Event timeline can be in-memory for now; persistent audit log is not required now.
 
+### Analysis Output Contract (rule feature/action separation)
+
+- A stored rule separates a perception-only `detectionFeature` (what to look for) from its
+  `actionContent` (the TTS utterance).
+- The realtime analysis prompt sends Gemma only the per-cycle rule alias (`r1`, `r2`, …) plus each
+  rule's `detectionFeature`. It MUST NOT send TTS/action content to the model.
+- Gemma returns a single strict-JSON confidence map: `{}` for no event, `{"r1":0.82,"r3":0.6}` for
+  events. The parser is recovery-first (tolerant regex), not strict-Gson-only: it recovers from a
+  missing closing brace, single quotes, a prose wrapper, and code fences.
+- The app resolves the action/TTS text locally from the stored rule after alias→UUID validation; the
+  model never supplies speech text on the analysis path.
+- A user-tunable confidence threshold (default 0.5) gates firing. A listed rule with a
+  missing/malformed/truncated confidence is treated as fired at the threshold and logged.
+
+### Rule Registration / Merge
+
+- Rule creation derives `detectionFeature` and runs a local lexical similarity prefilter against
+  existing rules. If a near-duplicate is found, the user is asked to Merge / Create new (default
+  highlight) / Cancel before anything is persisted; merges never happen silently.
+- Merging preserves the target rule's id and `createdAt`, updating feature/action/name/`updatedAt`.
+
 ## Testing and Validation
 
 This environment cannot perform phone/device debugging. Implementation still requires build/test gates.

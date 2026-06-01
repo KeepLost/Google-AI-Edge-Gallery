@@ -68,6 +68,7 @@ class SurveillancePromptBuilderTest {
         name = "Door watcher",
         rawPrompt = "有人靠近门口就提醒",
         triggerJson = "{\"condition\":\"person near door\"}",
+        detectionFeature = "a person is standing near the door",
         actionJson = "{\"type\":\"tts\",\"content\":\"门口有人\"}",
         actionType = "tts",
         actionContent = "门口有人",
@@ -86,9 +87,71 @@ class SurveillancePromptBuilderTest {
     // The stored UUID must not be injected as the id Gemma is asked to echo.
     assertFalse(prompt.contains("a3f2c1e8-7b9d-4c2a-8f10-0123456789ab"))
     // The short alias is used instead.
-    assertTrue(prompt.contains("\"ruleId\":\"r1\""))
+    assertTrue(prompt.contains("\"id\":\"r1\""))
     // The misleading literal example id must be gone.
     assertFalse(prompt.contains("rule-1"))
+  }
+
+  @Test
+  fun analysisPrompt_sendsDetectionFeatureButNeverActionContent() {
+    val rule =
+      SurveillanceRuleEntity(
+        id = "uuid-door",
+        name = "Door watcher",
+        rawPrompt = "有人靠近门口就提醒",
+        triggerJson = "{\"condition\":\"person near door\"}",
+        detectionFeature = "a person is standing near the door",
+        actionJson = "{\"type\":\"tts\",\"content\":\"Someone is at the door\"}",
+        actionType = "tts",
+        actionContent = "Someone is at the door",
+        active = true,
+        createdAt = 1L,
+        updatedAt = 1L,
+      )
+
+    val prompt =
+      SurveillancePromptBuilder.buildAnalysisPrompt(
+        rules = listOf(rule),
+        guidance = "少误报",
+        settings = SurveillanceRuntimeSettings.defaults(),
+      )
+
+    // Detection feature IS sent; TTS/action content is NEVER sent to the model on the analysis path.
+    assertTrue(prompt.contains("a person is standing near the door"))
+    assertFalse(prompt.contains("Someone is at the door"))
+    assertFalse(prompt.contains("ttsContent"))
+    // Confidence-map contract is requested.
+    assertTrue(prompt.contains("{\"r1\":0.82,\"r3\":0.6}"))
+    assertTrue(prompt.contains("return exactly: {}"))
+    assertTrue(prompt.contains("No words, no markdown"))
+  }
+
+  @Test
+  fun analysisPrompt_fallsBackToTriggerWhenDetectionFeatureBlank() {
+    val rule =
+      SurveillanceRuleEntity(
+        id = "uuid-legacy",
+        name = "Legacy",
+        rawPrompt = "legacy raw prompt",
+        triggerJson = "{\"condition\":\"a cat appears\"}",
+        detectionFeature = "",
+        actionJson = "{\"type\":\"tts\",\"content\":\"Cat\"}",
+        actionType = "tts",
+        actionContent = "Cat",
+        active = true,
+        createdAt = 1L,
+        updatedAt = 1L,
+      )
+
+    val prompt =
+      SurveillancePromptBuilder.buildAnalysisPrompt(
+        rules = listOf(rule),
+        guidance = "少误报",
+        settings = SurveillanceRuntimeSettings.defaults(),
+      )
+
+    assertTrue(prompt.contains("a cat appears"))
+    assertFalse(prompt.contains("\"Cat\""))
   }
 
   @Test
@@ -100,6 +163,7 @@ class SurveillancePromptBuilderTest {
           name = "Door watcher",
           rawPrompt = "门口",
           triggerJson = "{\"condition\":\"door\"}",
+          detectionFeature = "a person near the door",
           actionJson = "{\"type\":\"tts\",\"content\":\"门口有人\"}",
           actionType = "tts",
           actionContent = "门口有人",
@@ -112,6 +176,7 @@ class SurveillancePromptBuilderTest {
           name = "Window watcher",
           rawPrompt = "窗户",
           triggerJson = "{\"condition\":\"window\"}",
+          detectionFeature = "a person near the window",
           actionJson = "{\"type\":\"tts\",\"content\":\"窗户有人\"}",
           actionType = "tts",
           actionContent = "窗户有人",
@@ -128,20 +193,21 @@ class SurveillancePromptBuilderTest {
         settings = SurveillanceRuntimeSettings.defaults(),
       )
 
-    assertTrue(prompt.contains("\"ruleId\":\"r1\""))
-    assertTrue(prompt.contains("\"ruleId\":\"r2\""))
+    assertTrue(prompt.contains("\"id\":\"r1\""))
+    assertTrue(prompt.contains("\"id\":\"r2\""))
     assertFalse(prompt.contains("uuid-aaaa"))
     assertFalse(prompt.contains("uuid-bbbb"))
   }
 
   @Test
-  fun analysisPrompt_requiresJsonOnlyReasonSchemaAndRuleAttribution() {
+  fun analysisPrompt_requiresJsonMapOnlyContractAndAttribution() {
     val rule =
       SurveillanceRuleEntity(
         id = "rule-1",
         name = "Door watcher",
         rawPrompt = "有人靠近门口就提醒",
         triggerJson = "{\"condition\":\"person near door\"}",
+        detectionFeature = "a person near the door",
         actionJson = "{\"type\":\"tts\",\"content\":\"门口有人\"}",
         actionType = "tts",
         actionContent = "门口有人",
@@ -157,15 +223,12 @@ class SurveillancePromptBuilderTest {
         settings = SurveillanceRuntimeSettings.defaults(),
       )
 
-    assertTrue(prompt.contains("Return exactly one JSON object"))
-    assertTrue(prompt.contains("No markdown"))
-    assertTrue(prompt.contains("{\"events\":[]}"))
-    assertTrue(prompt.contains("ruleName"))
-    assertTrue(prompt.contains("reason"))
-    assertTrue(prompt.contains("Door watcher"))
-    assertTrue(prompt.contains("门口有人"))
+    assertTrue(prompt.contains("ONE strict JSON object"))
+    assertTrue(prompt.contains("return exactly: {}"))
     assertTrue(prompt.contains("non-overlapping window"))
     assertTrue(prompt.contains("oldest to newest"))
+    // Action/TTS text must never be present in the analysis prompt.
+    assertFalse(prompt.contains("门口有人"))
   }
 
   @Test
@@ -176,6 +239,7 @@ class SurveillancePromptBuilderTest {
         name = "Door watcher",
         rawPrompt = "有人靠近门口就提醒",
         triggerJson = "{\"condition\":\"person near door\"}",
+        detectionFeature = "a person near the door",
         actionJson = "{\"type\":\"tts\",\"content\":\"门口有人\"}",
         actionType = "tts",
         actionContent = "门口有人",
@@ -190,8 +254,8 @@ class SurveillancePromptBuilderTest {
     assertTrue(preview.contains("Frame sampling FPS: 2.0"))
     assertTrue(preview.contains("Lookback seconds: 5"))
     assertTrue(preview.contains("Frames attached separately: 10"))
-    assertTrue(preview.contains("Door watcher"))
-    assertTrue(preview.contains("Required JSON schema"))
+    assertTrue(preview.contains("a person near the door"))
+    assertTrue(preview.contains("Active rules (id and what to look for)"))
   }
 
   @Test

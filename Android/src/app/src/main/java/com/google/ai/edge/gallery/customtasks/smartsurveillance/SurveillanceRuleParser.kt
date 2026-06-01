@@ -29,6 +29,7 @@ data class ParsedSurveillanceRule(
   val name: String,
   val rawPrompt: String,
   val triggerJson: String,
+  val detectionFeature: String,
   val actionJson: String,
   val actionType: String,
   val actionContent: String,
@@ -121,12 +122,18 @@ object SurveillanceRuleParser {
     val triggerElement = root.get("triggerCondition") ?: root.get("trigger") ?: return null
     val triggerJson = if (triggerElement.isJsonPrimitive) gson.toJson(mapOf("condition" to triggerElement.asString)) else triggerElement.toString()
     val id = root.getString("id") ?: UUID.randomUUID().toString()
+    val triggerConditionText = if (triggerElement.isJsonPrimitive) triggerElement.asString else null
+    val detectionFeature =
+      (root.getString("detectionFeature") ?: root.getString("detection_feature") ?: triggerConditionText ?: rawPrompt)
+        .trim()
+        .take(MAX_DETECTION_FEATURE_CHARS)
 
     return ParsedSurveillanceRule(
       id = id,
       name = name,
       rawPrompt = rawPrompt,
       triggerJson = triggerJson,
+      detectionFeature = detectionFeature,
       actionJson = action.toString(),
       actionType = actionType,
       actionContent = actionContent,
@@ -156,6 +163,10 @@ object SurveillanceRuleParser {
     val id: String,
     val alias: String,
     val name: String?,
+    /** Stored TTS utterance resolved locally on a hit; the model never supplies this. */
+    val actionContent: String? = null,
+    /** Concise visual condition used to template the event reason; never required from the model. */
+    val detectionFeature: String? = null,
   )
 
   /** Single source of truth for the short prompt alias of the rule at [index] in the active list. */
@@ -204,6 +215,129 @@ object SurveillanceRuleParser {
     return parseAnalysisCore(response = response, nowMs = nowMs, modeLabel = "robust(rules=${rules.size})") { rawRuleId, event ->
       resolveRobust(rawRuleId = rawRuleId, event = event, rules = rules, byId = byId, byAlias = byAlias, byName = byName)
     }
+  }
+
+  /**
+   * Realtime confidence-map analysis contract (current monitoring format).
+   *
+   * Gemma is asked to return a single strict-JSON object mapping each clearly-triggered rule alias to
+   * a confidence in [0,1], or `{}` for no event. This parser is **recovery-first**: it never requires
+   * a balanced/complete JSON document. It extracts `alias:number` pairs with a tolerant regex so a
+   * truncated reply (missing closing brace), single-quoted keys, a stray prose wrapper, or a code
+   * fence still yield usable pairs. The action/TTS text is resolved locally from the stored rule
+   * ([AnalysisRule.actionContent]); the model never supplies speech text on this path.
+   *
+   * Semantics:
+   * - `{}` / empty / whitespace / no extractable pair -> [AnalysisParseResult.NoEvents].
+   * - pairs that resolve to active rules and meet [minConfidence] -> [AnalysisParseResult.Events].
+   * - a missing/malformed confidence value for a listed alias is treated as fired at [minConfidence]
+   *   (the act of listing the alias signals intent) and logged.
+   * - pairs that resolve to no active rule at all -> [AnalysisParseResult.Invalid] (unknown ids).
+   * - text containing neither `{`, `{}`, nor any `r<n>` token -> [AnalysisParseResult.Invalid].
+   */
+  fun parseAnalysisConfidenceMap(
+    response: String,
+    rules: List<AnalysisRule>,
+    minConfidence: Float = SurveillanceRuntimeSettings.DEFAULT_MIN_CONFIDENCE,
+    nowMs: Long = System.currentTimeMillis(),
+  ): AnalysisParseResult {
+    val threshold = minConfidence.coerceIn(0f, 1f)
+    logI("parseAnalysisConfidenceMap: rawLength=${response.length}, rules=${rules.size}, minConfidence=$threshold, rawPreview=${response.logPreview()}")
+    val byAlias = rules.associateBy { it.alias.trim().lowercase() }
+    val body = stripCodeFence(response).trim()
+    val pairs = CONFIDENCE_PAIR_REGEX.findAll(body).toList()
+
+    if (pairs.isEmpty()) {
+      // Distinguish an explicit/empty no-event reply from genuine garbage.
+      val looksLikeEmptyMap = body.isEmpty() || body == "{}" || body.replace(Regex("[\\s{}\\[\\]]"), "").isEmpty()
+      val mentionsAlias = Regex("(?i)\\br\\d+\\b").containsMatchIn(body)
+      return if (looksLikeEmptyMap && !mentionsAlias) {
+        logI("parseAnalysisConfidenceMap: empty map -> NoEvents")
+        AnalysisParseResult.NoEvents
+      } else {
+        logW("parseAnalysisConfidenceMap: no extractable rule:confidence pairs")
+        AnalysisParseResult.Invalid(
+          "Gemma did not return a rule confidence map.",
+          response.preview(),
+          body.preview(),
+          "pairs=0",
+        )
+      }
+    }
+
+    data class Hit(val confidence: Float, val defaulted: Boolean)
+    val bestByAlias = LinkedHashMap<String, Hit>()
+    val unknownAliases = LinkedHashSet<String>()
+    pairs.forEach { match ->
+      val alias = match.groupValues[1].lowercase()
+      val rawValue = match.groupValues.getOrNull(2)?.trim().orEmpty()
+      val parsedValue = if (COMPLETE_NUMBER_REGEX.matches(rawValue)) rawValue.toFloatOrNull() else null
+      val defaulted = parsedValue == null
+      val confidence = (parsedValue ?: threshold).coerceIn(0f, 1f)
+      if (defaulted) {
+        logW("parseAnalysisConfidenceMap: alias=$alias missing/malformed confidence='$rawValue', defaulting to threshold=$threshold")
+      }
+      if (!byAlias.containsKey(alias)) {
+        unknownAliases += alias
+        return@forEach
+      }
+      val existing = bestByAlias[alias]
+      if (existing == null || confidence > existing.confidence) {
+        bestByAlias[alias] = Hit(confidence, defaulted)
+      }
+    }
+
+    if (bestByAlias.isEmpty()) {
+      logW("parseAnalysisConfidenceMap: only unknown aliases=${unknownAliases.joinToString()}")
+      return AnalysisParseResult.Invalid(
+        "Model reported unknown rule id(s): ${unknownAliases.joinToString()}.",
+        response.preview(),
+        body.preview(),
+        "unknown=${unknownAliases.size}",
+      )
+    }
+
+    val events =
+      bestByAlias.entries.mapNotNull { (alias, hit) ->
+        val rule = byAlias[alias] ?: return@mapNotNull null
+        if (hit.confidence < threshold) {
+          logI("parseAnalysisConfidenceMap: alias=$alias confidence=${hit.confidence} below threshold=$threshold -> not fired")
+          return@mapNotNull null
+        }
+        val message = rule.actionContent?.takeIf { it.isNotBlank() }
+        if (message == null) {
+          logW("parseAnalysisConfidenceMap: alias=$alias resolved rule has no stored actionContent; skipping")
+          return@mapNotNull null
+        }
+        SurveillanceEvent(
+          ruleId = rule.id,
+          ruleName = rule.name,
+          message = message,
+          reason = templatedReason(rule.detectionFeature),
+          confidence = hit.confidence,
+          timestampMs = nowMs,
+        )
+      }
+
+    if (unknownAliases.isNotEmpty()) {
+      logW("parseAnalysisConfidenceMap: ignored unknown aliases=${unknownAliases.joinToString()}")
+    }
+    return if (events.isNotEmpty()) {
+      logI("parseAnalysisConfidenceMap: fired=${events.joinToString { "${it.ruleId}@${it.confidence}" }}")
+      AnalysisParseResult.Events(events)
+    } else {
+      logI("parseAnalysisConfidenceMap: all pairs below threshold -> NoEvents")
+      AnalysisParseResult.NoEvents
+    }
+  }
+
+  private fun templatedReason(detectionFeature: String?): String =
+    detectionFeature?.takeIf { it.isNotBlank() }?.let { "Matched rule: ${it.take(MAX_REASON_CHARS - 14)}" }
+      ?: DEFAULT_EVENT_REASON
+
+  private fun stripCodeFence(text: String): String {
+    val fenced = Regex("```(?:json)?\\s*([\\s\\S]*?)```", RegexOption.IGNORE_CASE).find(text)
+    return fenced?.groupValues?.getOrNull(1) ?: text
   }
 
   private fun resolveRobust(
@@ -451,4 +585,19 @@ object SurveillanceRuleParser {
   private const val DEFAULT_EVENT_REASON = "Matched rule conditions in the analyzed frames."
   private const val MAX_REASON_CHARS = 160
   private const val MAX_ENCODED_JSON_DEPTH = 1
+  private const val MAX_DETECTION_FEATURE_CHARS = 200
+
+  /**
+   * Recovery-first matcher for `alias : confidence` pairs in a confidence-map reply. Tolerates
+   * optional single/double quotes around the alias, arbitrary whitespace, and captures the value
+   * token loosely (up to the next delimiter) so a truncated/malformed value (`0.`, ``, `abc`) is
+   * still associated with its alias and can be defaulted by the caller. Case-insensitive on the `r`
+   * prefix. Does not require any surrounding braces, so a truncated/brace-less reply still yields
+   * pairs.
+   */
+  private val CONFIDENCE_PAIR_REGEX =
+    Regex("[\"']?\\b([rR]\\d+)\\b[\"']?\\s*:\\s*([^\\s,}\\]]*)")
+
+  /** A syntactically complete confidence number (e.g. `0.82`, `.8`, `1`, `1.0`). */
+  private val COMPLETE_NUMBER_REGEX = Regex("^(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)$")
 }

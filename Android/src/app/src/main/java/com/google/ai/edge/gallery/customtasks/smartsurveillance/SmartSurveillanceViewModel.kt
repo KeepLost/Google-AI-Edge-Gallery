@@ -33,10 +33,24 @@ data class SurveillanceUiState(
   val ttsStatus: String = "TTS initializing",
   val promptGuidance: SurveillancePromptGuidance = SurveillancePromptGuidance.defaults(),
   val runtimeSettings: SurveillanceRuntimeSettings = SurveillanceRuntimeSettings.defaults(),
+  val ruleMergeProposal: RuleMergeProposal? = null,
 ) {
   val inProgress: Boolean
     get() = inferenceOwner != InferenceOwner.None
 }
+
+/**
+ * Pending decision shown after a new rule is parsed but found similar to an existing one. The new
+ * rule is NOT persisted until the user picks Create-new or Merge; merging preserves the target
+ * rule's id and createdAt.
+ */
+data class RuleMergeProposal(
+  val parsedRule: ParsedSurveillanceRule,
+  val targetRuleId: String,
+  val targetRuleName: String,
+  val targetDetectionFeature: String,
+  val similarity: Float,
+)
 
 data class AnalysisDiagnostic(
   val message: String,
@@ -111,10 +125,15 @@ constructor(
   }
 
   fun saveRuntimeSettings(frameSamplingFps: Float, lookbackSeconds: Int) {
+    saveRuntimeSettings(frameSamplingFps = frameSamplingFps, lookbackSeconds = lookbackSeconds, minConfidence = _uiState.value.runtimeSettings.minConfidence)
+  }
+
+  fun saveRuntimeSettings(frameSamplingFps: Float, lookbackSeconds: Int, minConfidence: Float) {
     val settings =
       SurveillanceRuntimeSettings.sanitize(
         frameSamplingFps = frameSamplingFps,
         lookbackSeconds = lookbackSeconds,
+        minConfidence = minConfidence,
       )
     dataStoreRepository.saveSurveillanceRuntimeSettings(settings)
     _uiState.value = _uiState.value.copy(runtimeSettings = settings)
@@ -159,13 +178,89 @@ constructor(
   private suspend fun handleRuleCreationResponse(rawPrompt: String, response: String) {
     when (val parsed = SurveillanceRuleParser.parseRuleCreationResponse(rawPrompt = rawPrompt, response = response)) {
       is RuleCreationParseResult.Rule -> {
-        ruleDao.insertRule(parsed.rule.toEntity())
-        updateMonitoringState(requestedMonitoring = false, status = "Rule saved. Tap Start monitoring to enable real-time detection.")
-        addChat("Gemma: Rule saved - ${parsed.rule.name}. Tap Start monitoring when ready.")
+        val candidate =
+          RuleSimilarity.shortlist(
+            newFeature = parsed.rule.detectionFeature,
+            existing = rules.value.map { it.id to it.detectionFeature.ifBlank { it.triggerJson.ifBlank { it.rawPrompt } } },
+            k = 1,
+            floor = RULE_MERGE_SIMILARITY_FLOOR,
+          ).firstOrNull()
+        val target = candidate?.let { c -> rules.value.firstOrNull { it.id == c.id } }
+        if (candidate != null && target != null) {
+          logI("rule creation: similar existing rule found id=${target.id} score=${candidate.score}; awaiting user merge decision")
+          _uiState.value =
+            _uiState.value.copy(
+              ruleMergeProposal =
+                RuleMergeProposal(
+                  parsedRule = parsed.rule,
+                  targetRuleId = target.id,
+                  targetRuleName = target.name,
+                  targetDetectionFeature = target.detectionFeature.ifBlank { target.triggerJson },
+                  similarity = candidate.score,
+                ),
+            )
+          addChat("Gemma: This looks similar to existing rule '${target.name}'. Choose Merge or Create new.")
+        } else {
+          persistNewRule(parsed.rule)
+        }
       }
       is RuleCreationParseResult.NotRule -> addChat("Gemma: ${parsed.message}")
       is RuleCreationParseResult.Invalid -> addChat("Gemma: ${parsed.message}")
     }
+  }
+
+  private suspend fun persistNewRule(rule: ParsedSurveillanceRule) {
+    ruleDao.insertRule(rule.toEntity())
+    updateMonitoringState(requestedMonitoring = false, status = "Rule saved. Tap Start monitoring to enable real-time detection.")
+    addChat("Gemma: Rule saved - ${rule.name}. Tap Start monitoring when ready.")
+  }
+
+  /** Create the proposed rule as a brand-new rule with a fresh id (default, non-destructive choice). */
+  fun confirmCreateNewRule() {
+    val proposal = _uiState.value.ruleMergeProposal ?: return
+    _uiState.value = _uiState.value.copy(ruleMergeProposal = null)
+    viewModelScope.launch { persistNewRule(proposal.parsedRule) }
+  }
+
+  /**
+   * Merge the proposed rule into the existing target: update feature/action/name/updatedAt while
+   * preserving the target rule's id and createdAt (so cooldown/history stay coherent).
+   */
+  fun confirmMergeRule() {
+    val proposal = _uiState.value.ruleMergeProposal ?: return
+    _uiState.value = _uiState.value.copy(ruleMergeProposal = null)
+    viewModelScope.launch {
+      val target = rules.value.firstOrNull { it.id == proposal.targetRuleId }
+      if (target == null) {
+        // Target vanished (deleted while dialog was open); fall back to create-new.
+        logW("merge target ${proposal.targetRuleId} no longer exists; creating new rule instead")
+        persistNewRule(proposal.parsedRule)
+        return@launch
+      }
+      val merged =
+        target.copy(
+          name = proposal.parsedRule.name,
+          rawPrompt = proposal.parsedRule.rawPrompt,
+          triggerJson = proposal.parsedRule.triggerJson,
+          detectionFeature = proposal.parsedRule.detectionFeature,
+          actionJson = proposal.parsedRule.actionJson,
+          actionType = proposal.parsedRule.actionType,
+          actionContent = proposal.parsedRule.actionContent,
+          active = true,
+          updatedAt = System.currentTimeMillis(),
+          // id and createdAt intentionally preserved from target.
+        )
+      ruleDao.updateRule(merged)
+      logI("rule merged into id=${merged.id} (createdAt preserved=${merged.createdAt})")
+      updateMonitoringState(requestedMonitoring = monitoringJob != null, status = "Rule merged into '${merged.name}'.")
+      addChat("Gemma: Merged into existing rule '${merged.name}'.")
+    }
+  }
+
+  fun cancelRuleProposal() {
+    if (_uiState.value.ruleMergeProposal == null) return
+    _uiState.value = _uiState.value.copy(ruleMergeProposal = null)
+    addChat("Gemma: Rule creation cancelled.")
   }
 
   private fun sendAskMessage(model: Model, text: String) {
@@ -399,9 +494,11 @@ constructor(
           id = rule.id,
           alias = SurveillanceRuleParser.analysisAlias(index),
           name = rule.name,
+          actionContent = rule.actionContent,
+          detectionFeature = rule.detectionFeature.ifBlank { rule.triggerJson },
         )
       }
-    when (val parsed = SurveillanceRuleParser.parseAnalysisResponse(response, rules = analysisRules)) {
+    when (val parsed = SurveillanceRuleParser.parseAnalysisConfidenceMap(response, rules = analysisRules, minConfidence = _uiState.value.runtimeSettings.minConfidence)) {
       is AnalysisParseResult.Events -> {
         logI("parse analysis result: events=${parsed.events.size}, ruleIds=${parsed.events.joinToString { it.ruleId }}")
         _uiState.value = _uiState.value.copy(events = (parsed.events + _uiState.value.events).take(20), analysisDiagnostic = null)
@@ -502,5 +599,6 @@ constructor(
     private const val INFERENCE_TIMEOUT_MS = 60_000L
     private const val TTS_COOLDOWN_MS = 15_000L
     private const val COLLECTION_POLL_MS = 200L
+    private const val RULE_MERGE_SIMILARITY_FLOOR = 0.6f
   }
 }

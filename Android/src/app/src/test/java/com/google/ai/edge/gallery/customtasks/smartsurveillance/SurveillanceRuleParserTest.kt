@@ -46,6 +46,34 @@ class SurveillanceRuleParserTest {
   }
 
   @Test
+  fun parseRuleJson_derivesDetectionFeatureFromDedicatedField() {
+    val rule =
+      SurveillanceRuleParser.parseRuleJson(
+        rawPrompt = "Tell me if someone is at the door",
+        response =
+          """
+          {"name":"Door","detectionFeature":"a person is standing near the door","triggerCondition":"person near door","action":{"type":"tts","content":"Door"}}
+          """.trimIndent(),
+      )
+
+    assertEquals("a person is standing near the door", rule?.detectionFeature)
+  }
+
+  @Test
+  fun parseRuleJson_fallsBackDetectionFeatureToTriggerCondition() {
+    val rule =
+      SurveillanceRuleParser.parseRuleJson(
+        rawPrompt = "Tell me if someone is at the door",
+        response =
+          """
+          {"name":"Door","triggerCondition":"person near door","action":{"type":"tts","content":"Door"}}
+          """.trimIndent(),
+      )
+
+    assertEquals("person near door", rule?.detectionFeature)
+  }
+
+  @Test
   fun parseAnalysisJson_returnsOnlyTriggeredTtsEvents() {
     val events =
       SurveillanceRuleParser.parseAnalysisJson(

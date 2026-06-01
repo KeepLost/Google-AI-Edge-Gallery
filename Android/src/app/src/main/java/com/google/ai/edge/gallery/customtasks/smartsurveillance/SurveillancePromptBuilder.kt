@@ -21,7 +21,8 @@ object SurveillancePromptBuilder {
     - Return JSON only.
     - Supported executable action is tts only.
     - Never create notification or agent actions.
-    - For a rule, return exactly: {"type":"rule","rule":{"name":"...","triggerCondition":"...","action":{"type":"tts","content":"..."}}}
+    - For a rule, return exactly: {"type":"rule","rule":{"name":"...","detectionFeature":"one short visually-checkable condition, e.g. a person is standing near the door","triggerCondition":"...","action":{"type":"tts","content":"..."}}}
+    - "detectionFeature" must describe only what is visible in the frames. It must NOT contain the spoken/TTS text or any action.
     - For non-rule input, return exactly: {"type":"not_rule","message":"..."}
 
     User rule: $userText
@@ -74,33 +75,33 @@ object SurveillancePromptBuilder {
     Treat this as a single stateless analysis cycle. Do not use ordinary Ask messages or rule-creation conversation.
     The attached frames are sampled from one non-overlapping window, ordered oldest to newest, covering about ${settings.lookbackSeconds} seconds.
     There are up to ${settings.maxFramesPerRequest} frames attached separately; images are not embedded in this text prompt.
-    Only emit events for clear trigger matches in the provided frames.
-    Do not trigger just because a rule exists.
-    If there is no clear event, return {"events":[]}.
-    Only use action.type "tts".
-    Prefer no event when confidence is low.
-    Return exactly one JSON object. No markdown. No prose. No code fence.
-    If unsure, return {"events":[]} rather than explanation.
+    Only report a rule when its detection feature clearly matches the provided frames.
+    Do not report a rule just because it exists.
+    Prefer reporting nothing when confidence is low.
 
-    Rule attribution:
-    - Set "ruleId" to the exact short id of the matched rule from the Active rules list below (for example "r1", "r2").
-    - Copy the short id verbatim. Do not invent ids and do not use the rule name as the id.
+    Output contract:
+    - Return ONE strict JSON object mapping each clearly-triggered rule id to your confidence (a number from 0.0 to 1.0).
+    - Example with a match: {"r1":0.82,"r3":0.6}
+    - If nothing is clearly triggered, return exactly: {}
+    - Use the exact short ids from the Active rules list below (for example "r1", "r2"). Do not invent ids and do not use the rule name as the id.
+    - Output only this JSON object. No words, no markdown, no code fence, no explanation.
 
     User guidance:
     $guidance
 
-    Required JSON schema:
-    {"events":[{"ruleId":"short id copied from active rules, e.g. r1","ruleName":"name copied from active rules","confidence":0.0,"reason":"one short sentence explaining visible evidence","action":{"type":"tts","content":"speech"}}]}
-
-    Example with no match:
-    {"events":[]}
-
-    Example with match:
-    {"events":[{"ruleId":"r1","ruleName":"Door watcher","confidence":0.82,"reason":"A person is standing next to the door.","action":{"type":"tts","content":"Someone is at the door"}}]}
-
-    Active rules:
-    ${rules.mapIndexed { index, rule -> "{\"ruleId\":\"${SurveillanceRuleParser.analysisAlias(index)}\",\"ruleName\":\"${rule.name}\",\"triggerCondition\":${rule.triggerJson},\"ttsContent\":\"${rule.actionContent}\"}" }.joinToString("\n")}
+    Active rules (id and what to look for):
+    ${rules.mapIndexed { index, rule -> "{\"id\":\"${SurveillanceRuleParser.analysisAlias(index)}\",\"detectionFeature\":\"${analysisFeatureText(rule)}\"}" }.joinToString("\n")}
     """.trimIndent()
+
+  /**
+   * Perception-only feature text injected into the analysis prompt. Never includes TTS/action
+   * content. Falls back to the stored trigger/raw prompt for rules created before the
+   * detection_feature migration. JSON-escaped for safe single-line embedding.
+   */
+  private fun analysisFeatureText(rule: SurveillanceRuleEntity): String {
+    val raw = rule.detectionFeature.ifBlank { rule.triggerJson.ifBlank { rule.rawPrompt } }
+    return raw.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ").trim()
+  }
 
   fun buildAnalysisPromptPreview(
     rules: List<SurveillanceRuleEntity>,

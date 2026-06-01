@@ -218,9 +218,57 @@ fun SmartSurveillanceScreen(
         showSettings = false
       },
       onSaveRuntimeSettings = viewModel::saveRuntimeSettings,
+      onSaveMinConfidence = { minConfidence ->
+        viewModel.saveRuntimeSettings(
+          uiState.runtimeSettings.frameSamplingFps,
+          uiState.runtimeSettings.lookbackSeconds,
+          minConfidence,
+        )
+      },
       onReset = { viewModel.resetPromptGuidance() },
     )
   }
+
+  uiState.ruleMergeProposal?.let { proposal ->
+    RuleMergeDialog(
+      proposal = proposal,
+      onMerge = viewModel::confirmMergeRule,
+      onCreateNew = viewModel::confirmCreateNewRule,
+      onCancel = viewModel::cancelRuleProposal,
+    )
+  }
+}
+
+@Composable
+private fun RuleMergeDialog(
+  proposal: RuleMergeProposal,
+  onMerge: () -> Unit,
+  onCreateNew: () -> Unit,
+  onCancel: () -> Unit,
+) {
+  AlertDialog(
+    onDismissRequest = onCancel,
+    title = { Text("Similar rule found") },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+          "The new rule looks similar to '${proposal.targetRuleName}' (${"%.0f".format(proposal.similarity * 100)}% match). Merge into it, or create a separate rule?",
+          style = MaterialTheme.typography.bodyMedium,
+        )
+        Text("Existing: ${proposal.targetDetectionFeature}", style = MaterialTheme.typography.bodySmall)
+        Text("New: ${proposal.parsedRule.detectionFeature}", style = MaterialTheme.typography.bodySmall)
+        Text("Will speak: ${proposal.parsedRule.actionContent}", style = MaterialTheme.typography.bodySmall)
+      }
+    },
+    // Safe default highlight: Create new (non-destructive).
+    confirmButton = { Button(onClick = onCreateNew) { Text("Create new") } },
+    dismissButton = {
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        TextButton(onClick = onCancel) { Text("Cancel") }
+        OutlinedButton(onClick = onMerge) { Text("Merge") }
+      }
+    },
+  )
 }
 
 @Composable
@@ -427,6 +475,7 @@ private fun AnalysisDiagnosticCard(diagnostic: AnalysisDiagnostic) {
 private fun RuntimeSettingsCard(
   settings: SurveillanceRuntimeSettings,
   onSaveRuntimeSettings: (Float, Int) -> Unit,
+  onSaveMinConfidence: (Float) -> Unit,
 ) {
   Card(modifier = Modifier.fillMaxWidth()) {
     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -450,6 +499,17 @@ private fun RuntimeSettingsCard(
             selected = settings.lookbackSeconds == seconds,
             onClick = { onSaveRuntimeSettings(settings.frameSamplingFps, seconds) },
             label = { Text("${seconds}s") },
+          )
+        }
+      }
+      Text("Detection confidence threshold", style = MaterialTheme.typography.labelMedium)
+      Text("Only fire a rule when Gemma's confidence is at least this value.", style = MaterialTheme.typography.bodySmall)
+      Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        SurveillanceRuntimeSettings.SUPPORTED_MIN_CONFIDENCE.forEach { threshold ->
+          FilterChip(
+            selected = settings.minConfidence == threshold,
+            onClick = { onSaveMinConfidence(threshold) },
+            label = { Text("%.1f".format(threshold)) },
           )
         }
       }
@@ -511,6 +571,7 @@ private fun SmartSurveillanceSettingsDialog(
   onDismiss: () -> Unit,
   onSave: (String, String, String) -> Unit,
   onSaveRuntimeSettings: (Float, Int) -> Unit,
+  onSaveMinConfidence: (Float) -> Unit,
   onReset: () -> Unit,
 ) {
   var rule by remember(guidance.rule) { mutableStateOf(guidance.rule) }
@@ -553,7 +614,11 @@ private fun SmartSurveillanceSettingsDialog(
             }
           }
           SettingsSection.Monitoring -> {
-            RuntimeSettingsCard(settings = runtimeSettings, onSaveRuntimeSettings = onSaveRuntimeSettings)
+            RuntimeSettingsCard(
+              settings = runtimeSettings,
+              onSaveRuntimeSettings = onSaveRuntimeSettings,
+              onSaveMinConfidence = onSaveMinConfidence,
+            )
           }
         }
       }
